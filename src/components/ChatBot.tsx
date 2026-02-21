@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import { MessageCircle, X, Send, Sparkles } from "lucide-react";
+import ReactMarkdown from "react-markdown";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -242,12 +243,28 @@ export default function ChatBot() {
                     }`}
                   >
                     {m.content ? (
-                      m.content.split("\n").map((line, i, arr) => (
-                        <span key={i}>
-                          {line}
-                          {i < arr.length - 1 && <br />}
-                        </span>
-                      ))
+                      m.role === "assistant" ? (
+                        <ReactMarkdown
+                          components={{
+                            p: ({ children }) => <p className="mb-1.5 last:mb-0">{children}</p>,
+                            strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+                            ul: ({ children }) => <ul className="mb-1.5 space-y-0.5 last:mb-0">{children}</ul>,
+                            ol: ({ children }) => <ol className="mb-1.5 list-decimal space-y-0.5 pl-4 last:mb-0">{children}</ol>,
+                            li: ({ children }) => <li className="ml-4 list-disc">{children}</li>,
+                            h3: ({ children }) => <h3 className="mb-1 mt-2.5 font-bold first:mt-0">{children}</h3>,
+                            h4: ({ children }) => <h4 className="mb-1 mt-2 font-semibold first:mt-0">{children}</h4>,
+                          }}
+                        >
+                          {m.content}
+                        </ReactMarkdown>
+                      ) : (
+                        m.content.split("\n").map((line, i, arr) => (
+                          <span key={i}>
+                            {line}
+                            {i < arr.length - 1 && <br />}
+                          </span>
+                        ))
+                      )
                     ) : (
                       streaming && (
                         <span className="inline-flex gap-1">
