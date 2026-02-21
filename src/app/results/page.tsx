@@ -234,7 +234,8 @@ function budgetBadge(stressPct: number): { label: string; color: string; bg: str
   if (stressPct <= 25) return { label: "Great Value", color: "text-emerald-700", bg: "bg-emerald-50 border-emerald-200" };
   if (stressPct <= 30) return { label: "Comfortable", color: "text-emerald-700", bg: "bg-emerald-50 border-emerald-200" };
   if (stressPct <= 40) return { label: "Manageable", color: "text-amber-700", bg: "bg-amber-50 border-amber-200" };
-  return { label: "Pricey", color: "text-red-700", bg: "bg-red-50 border-red-200" };
+  if (stressPct <= 100) return { label: "Pricey", color: "text-red-700", bg: "bg-red-50 border-red-200" };
+  return { label: "Above Budget", color: "text-red-700", bg: "bg-red-50 border-red-200" };
 }
 
 function topDwellingType(types: Record<string, number>): string | null {

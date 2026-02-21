@@ -162,6 +162,9 @@ export async function GET(request: NextRequest) {
     }
 
     const scored: ScoredSuburb[] = [];
+    // Suburbs skipped only because rent > income (have rent data but unaffordable).
+    // We'll force-include these if they're at the workplace postcode.
+    const overBudget: { suburb: Suburb; totalRent: number; perPersonRent: number; rentEstimated: boolean }[] = [];
 
     for (const suburb of getAllSuburbs()) {
       const resolved = resolveSharedRent(suburb, bedrooms, sharingCount, shareBedroom);
@@ -172,7 +175,11 @@ export async function GET(request: NextRequest) {
       // Rent stress uses per-person rent
       const stress = calculateRentStress(income, perPersonRent);
       // Only filter if per-person rent exceeds income entirely
-      if (stress.percentage > 100) continue;
+      if (stress.percentage > 100) {
+        // Keep track so we can force-include workplace-postcode suburbs below
+        overBudget.push({ suburb, totalRent: totalRent!, perPersonRent, rentEstimated });
+        continue;
+      }
 
       // Solo rent for savings comparison (1-bed as baseline)
       let soloRent: number | null = null;
@@ -250,6 +257,58 @@ export async function GET(request: NextRequest) {
         savings_vs_solo: savingsVsSolo,
         rent_estimated: rentEstimated,
       });
+    }
+
+    // Force-include over-budget suburbs at the workplace postcode so that the
+    // workplace area always appears in results even when rent > user's budget.
+    if (workplacePostcode && overBudget.length > 0) {
+      const alreadyIncluded = new Set(scored.map((s) => s.suburb_key));
+      for (const { suburb, totalRent, perPersonRent, rentEstimated } of overBudget) {
+        if (suburb.postcode !== workplacePostcode) continue;
+        if (alreadyIncluded.has(suburb.suburb_key)) continue;
+
+        const stress = calculateRentStress(income, perPersonRent);
+
+        let nearestStation: ScoredSuburb["nearest_station"] = null;
+        if (suburb.lat != null && suburb.lng != null) {
+          const ns = getNearestStation(suburb.lat, suburb.lng);
+          if (ns) {
+            nearestStation = {
+              name: ns.station.name,
+              distance_km: ns.distanceKm,
+              type: ns.station.type,
+              lines: ns.station.lines,
+            };
+          }
+        }
+
+        const supplyBonus = Math.min(5, suburb.total_bonds / 500);
+        const affordabilityScore = Math.round((stress.percentage - supplyBonus) * 10) / 10;
+
+        scored.push({
+          suburb_key: suburb.suburb_key,
+          postcode: suburb.postcode,
+          suburb_name: suburb.suburb_name,
+          lat: suburb.lat,
+          lng: suburb.lng,
+          median_rent: perPersonRent,
+          rent_stress_pct: stress.percentage,
+          affordability_score: affordabilityScore,
+          rating: stress.rating,
+          total_bonds: suburb.total_bonds,
+          rent_trend: suburb.rent_trend,
+          dwelling_types: suburb.dwelling_types,
+          nearest_station: nearestStation,
+          commute_minutes: null,
+          commute_label: null,
+          sharing_mode: sharingCount,
+          total_rent: totalRent,
+          per_person_rent: perPersonRent,
+          solo_rent: null,
+          savings_vs_solo: null,
+          rent_estimated: rentEstimated,
+        });
+      }
     }
 
     // Sort by rent stress (lowest first) as default API ordering
