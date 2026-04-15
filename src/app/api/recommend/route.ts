@@ -9,7 +9,7 @@ import {
 } from "@/lib/suburbs";
 import { getNearestStation, estimateCommuteTime } from "@/lib/commute";
 
-const MAX_RESULTS = 500; // return enough for all client-side sort modes
+const MAX_RESULTS = 1000; // return enough for all client-side sort modes
 
 /**
  * Resolve the rent field + per-person divisor for sharing mode.

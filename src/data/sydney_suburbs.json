@@ -19973,46 +19973,6 @@
     "distance_to_macquarie_park_km": 26.6,
     "distance_to_chatswood_km": 30.6
   },
-  "Wentworth_Port_2177": {
-    "postcode": "2177",
-    "median_rent_overall": 540,
-    "avg_rent": 560,
-    "total_bonds": 1117,
-    "median_rent_1bed": 360,
-    "median_rent_2bed": 460,
-    "median_rent_3bed": 570,
-    "median_rent_4bed": 700,
-    "median_rent_5+bed": 770,
-    "dwelling_types": {
-      "House": 52.2,
-      "Flat": 28.4,
-      "Unknown": 8.7,
-      "Other": 7.4,
-      "Townhouse": 3.3
-    },
-    "rent_trend": {
-      "2021": 450,
-      "2022": 480,
-      "2023": 550,
-      "2024": 600,
-      "2025": 630
-    },
-    "median_household_income_weekly": 1571,
-    "rent_stress_pct_1bed": 22.9,
-    "rent_stress_pct_2bed": 29.3,
-    "rent_stress_pct_3bed": 36.3,
-    "rent_stress_pct_4bed": 44.6,
-    "rent_stress_pct_5+bed": 49.0,
-    "suburb_key": "Wentworth_Port_2177",
-    "suburb_name": "Wentworth Port",
-    "lat": -33.828,
-    "lng": 151.077,
-    "distance_to_cbd_km": 13.0,
-    "distance_to_parramatta_km": 7.2,
-    "distance_to_north_sydney_km": 12.1,
-    "distance_to_macquarie_park_km": 7.4,
-    "distance_to_chatswood_km": 10.4
-  },
   "Cecil_Park_2178": {
     "postcode": "2178",
     "median_rent_overall": 650,
