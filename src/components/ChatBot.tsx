@@ -13,6 +13,30 @@ interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** A local error notice, shown in the thread but never sent to the API. */
+  error?: boolean;
+}
+
+/** Mirrors the `context` field accepted by POST /api/chat. */
+interface ChatContext {
+  /** Weekly dollars: income in "income" mode, max weekly rent in "budget" mode. */
+  weeklyIncome?: number;
+  mode?: "income" | "budget";
+  bedrooms?: number;
+  workplace?: string;
+  sharing?: number;
+  shareBedroom?: boolean;
+}
+
+// Limits enforced by POST /api/chat
+const MAX_HISTORY = 20;
+const MAX_USER_CHARS = 2000;
+const MAX_WORKPLACE_CHARS = 60;
+
+function intInRange(value: string | null, min: number, max: number): number | undefined {
+  if (!value) return undefined;
+  const n = Number(value);
+  return Number.isInteger(n) && n >= min && n <= max ? n : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -38,19 +62,29 @@ export default function ChatBot() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Extract user search context from URL params (set by the search form)
+  // Extract user search context from URL params (set by the search form).
+  // `weekly` is always the weekly amount; `income` is in whatever period the
+  // user typed, so it is never sent. Invalid values are dropped, not sent.
   const userContext = useMemo(() => {
-    const income = searchParams.get("income");
-    const bedrooms = searchParams.get("bedrooms");
-    const workplace = searchParams.get("workplace");
-    const sharing = searchParams.get("sharing");
-    const shareBedroom = searchParams.get("share_bedroom");
-    const ctx: { income?: number; bedrooms?: number; workplace?: string; sharing?: number; shareBedroom?: boolean } = {};
-    if (income) ctx.income = Number(income);
-    if (bedrooms) ctx.bedrooms = Number(bedrooms);
-    if (workplace) ctx.workplace = workplace;
-    if (sharing) ctx.sharing = Number(sharing);
-    if (shareBedroom === "1") ctx.shareBedroom = true;
+    const ctx: ChatContext = {};
+
+    const weekly = Number(searchParams.get("weekly"));
+    if (Number.isFinite(weekly) && weekly > 0 && weekly <= 100_000) {
+      ctx.weeklyIncome = weekly;
+      ctx.mode = searchParams.get("mode") === "budget" ? "budget" : "income";
+    }
+
+    const bedrooms = intInRange(searchParams.get("bedrooms"), 1, 5);
+    if (bedrooms) ctx.bedrooms = bedrooms;
+
+    const sharing = intInRange(searchParams.get("sharing"), 1, 4);
+    if (sharing) ctx.sharing = sharing;
+
+    const workplace = searchParams.get("workplace")?.trim();
+    if (workplace && workplace.length <= MAX_WORKPLACE_CHARS) ctx.workplace = workplace;
+
+    if (searchParams.get("share_bedroom") === "1") ctx.shareBedroom = true;
+
     return Object.keys(ctx).length > 0 ? ctx : undefined;
   }, [searchParams]);
 
@@ -68,7 +102,7 @@ export default function ChatBot() {
 
   const sendMessage = useCallback(
     async (text: string) => {
-      const trimmed = text.trim();
+      const trimmed = text.trim().slice(0, MAX_USER_CHARS);
       if (!trimmed || streaming) return;
 
       const userMsg: Message = {
@@ -88,11 +122,16 @@ export default function ChatBot() {
       setStreaming(true);
 
       try {
-        // Build message history for the API
-        const history = [...messages, userMsg].map((m) => ({
-          role: m.role,
-          content: m.content,
-        }));
+        // Build message history for the API. Empty assistant turns (a reply
+        // that never arrived) and local error notices are left out: an empty
+        // turn makes the API reject every later request.
+        let history = [...messages, userMsg]
+          .filter((m) => !m.error && m.content.trim().length > 0)
+          .slice(-MAX_HISTORY)
+          .map((m) => ({ role: m.role, content: m.content }));
+        // The window must open on a user turn
+        const firstUser = history.findIndex((m) => m.role === "user");
+        history = history.slice(firstUser);
 
         const res = await fetch("/api/chat", {
           method: "POST",
@@ -105,7 +144,7 @@ export default function ChatBot() {
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantMsg.id
-                ? { ...m, content: `Sorry, something went wrong: ${err.error ?? "Unknown error"}` }
+                ? { ...m, error: true, content: `Sorry, something went wrong: ${err.error ?? "Unknown error"}` }
                 : m,
             ),
           );
@@ -130,11 +169,13 @@ export default function ChatBot() {
             ),
           );
         }
+        // A stream that ends with no text is a failed reply, not a blank one
+        if (!accumulated.trim()) throw new Error("Empty reply");
       } catch {
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantMsg.id
-              ? { ...m, content: "Sorry, I couldn't connect. Please try again." }
+              ? { ...m, error: true, content: "Sorry, I couldn't connect. Please try again." }
               : m,
           ),
         );
@@ -290,6 +331,7 @@ export default function ChatBot() {
                   onKeyDown={handleKeyDown}
                   placeholder="Ask about Sydney rentals..."
                   rows={1}
+                  maxLength={MAX_USER_CHARS}
                   className="max-h-24 min-h-[44px] flex-1 resize-none rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-primary focus:bg-white focus:ring-1 focus:ring-primary/20 focus:outline-none"
                 />
                 <button

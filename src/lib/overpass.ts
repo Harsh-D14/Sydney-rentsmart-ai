@@ -1,4 +1,5 @@
 import { API_CONFIG, buildOverpassQuery } from "@/config/apis";
+import { haversineKm } from "@/lib/geo";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -36,34 +37,8 @@ interface OverpassElement {
 }
 
 // ---------------------------------------------------------------------------
-// Haversine (local copy to avoid import from app lib in scripts)
-// ---------------------------------------------------------------------------
-
-function haversineKm(
-  lat1: number,
-  lng1: number,
-  lat2: number,
-  lng2: number,
-): number {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLng = ((lng2 - lng1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Sleep for rate-limiting between Overpass calls. */
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function emptyCategorized(): CategorizedAmenities {
   return {
@@ -139,12 +114,18 @@ export async function fetchOverpassAmenities(
   const url = API_CONFIG.overpass.baseUrl;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60_000);
+  const timeout = setTimeout(
+    () => controller.abort(),
+    API_CONFIG.overpass.timeout * 1000,
+  );
 
   try {
     const resp = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": API_CONFIG.overpass.userAgent,
+      },
       body: `data=${encodeURIComponent(query)}`,
       signal: controller.signal,
     });
@@ -155,6 +136,12 @@ export async function fetchOverpassAmenities(
     }
 
     const data = await resp.json();
+    // Overpass reports a server-side timeout as HTTP 200 with a `remark` and
+    // partial (usually empty) results. Treat it as a failure so an empty
+    // answer is never cached as if the area had no amenities.
+    if (typeof data.remark === "string" && /error/i.test(data.remark)) {
+      throw new Error(`Overpass API remark: ${data.remark.slice(0, 300)}`);
+    }
     const elements: OverpassElement[] = data.elements ?? [];
 
     const result = emptyCategorized();

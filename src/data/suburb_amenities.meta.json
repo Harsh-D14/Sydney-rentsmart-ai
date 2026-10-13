@@ -1,0 +1,38 @@
+{
+  "generated_at": "2026-10-13T02:04:27.927Z",
+  "source": "OpenStreetMap via Overpass API",
+  "license": "© OpenStreetMap contributors, ODbL 1.0",
+  "osm_data_timestamp": "2026-10-12T22:35:00Z",
+  "radius_km": 5,
+  "max_per_category": 15,
+  "postcodes": 234,
+  "postcodes_without_coordinates": [
+    "2012",
+    "2057",
+    "2059"
+  ],
+  "counts": {
+    "hospitals": 1356,
+    "schools": 3189,
+    "universities": 646,
+    "fire_stations": 1364,
+    "police": 1044,
+    "childcare": 2669
+  },
+  "postcodes_with_zero": {
+    "hospitals": 41,
+    "schools": 0,
+    "universities": 94,
+    "fire_stations": 3,
+    "police": 31,
+    "childcare": 12
+  },
+  "unique_items_in_area": {
+    "hospitals": 129,
+    "schools": 1562,
+    "universities": 43,
+    "fire_stations": 255,
+    "police": 95,
+    "childcare": 579
+  }
+}

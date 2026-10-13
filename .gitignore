@@ -5,6 +5,10 @@ node_modules/
 .next/
 out/
 
+# TypeScript incremental build info
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
 # Environment variables (YOUR API KEYS - NEVER UPLOAD)
 .env.local
 .env
@@ -12,12 +16,15 @@ out/
 .env.development
 *.env
 
+# Test coverage output
+coverage/
+
+# Raw download cache of scripts/build-amenities.mjs
+scripts/.cache/
+
 # OS files
 .DS_Store
 Thumbs.db
 
 # Debug logs
 npm-debug.log*
-
-# Data files (too large for GitHub, not needed for deployment)
-../data/

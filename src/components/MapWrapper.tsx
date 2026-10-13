@@ -1,7 +1,6 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import type { Suburb } from "@/lib/suburbs";
 import type { TrainStation } from "@/lib/commute";
 import stationData from "@/data/train_stations.json";
 
@@ -18,38 +17,64 @@ const SydneyMap = dynamic(() => import("./SydneyMap"), {
 });
 
 const stations = stationData as TrainStation[];
+const NO_STATIONS: TrainStation[] = [];
 
-interface MapWrapperProps {
-  suburbs: Suburb[];
-  highlighted?: Set<string>;
+/**
+ * One circle on the map. Deliberately a small local shape rather than the
+ * server-side Suburb type, so the map never pulls the suburb dataset into the
+ * browser bundle.
+ */
+export interface MapPoint {
+  key: string;            // unique; suburb_key
+  postcode: string;
+  name: string;           // display name
+  names?: string[];       // other suburb names covered
+  lat: number;
+  lng: number;
+  rent: number;           // weekly rent shown and used for colour
+  bonds: number;          // used for circle size
+  lowSample?: boolean;
+  rent1bed?: number | null;
+  rent2bed?: number | null;
+  rent3bed?: number | null;
+  medianIncome?: number | null;   // AREA median household income, never the user's
+  dwellingTypes?: Record<string, number>;
+}
+
+export interface MapWrapperProps {
+  points: MapPoint[];
+  highlighted?: Set<string>;      // MapPoint keys
   filtersActive?: boolean;
-  showStations?: boolean;
-  selectedSuburbKey?: string | null;
-  workplaceSuburbKey?: string | null;
-  workplacePostcode?: string | null;
+  showStations?: boolean;         // default true
+  selectedKey?: string | null;
+  workplace?: { name: string; lat: number; lng: number } | null;
+  route?: [number, number][] | null;   // optional routed geometry [lat,lng] to draw between selected point and workplace
+  rentLabel?: string;             // what MapPoint.rent is; default "Median rent"
   onResetView?: () => void;
 }
 
 export default function MapWrapper({
-  suburbs,
+  points,
   highlighted,
   filtersActive,
   showStations = true,
-  selectedSuburbKey,
-  workplaceSuburbKey,
-  workplacePostcode,
+  selectedKey,
+  workplace,
+  route,
+  rentLabel,
   onResetView,
 }: MapWrapperProps) {
   return (
     <SydneyMap
-      suburbs={suburbs}
+      points={points}
       highlighted={highlighted}
       filtersActive={filtersActive}
       showStations={showStations}
-      stations={showStations ? stations : []}
-      selectedSuburbKey={selectedSuburbKey}
-      workplaceSuburbKey={workplaceSuburbKey}
-      workplacePostcode={workplacePostcode}
+      stations={showStations ? stations : NO_STATIONS}
+      selectedKey={selectedKey}
+      workplace={workplace}
+      route={route}
+      rentLabel={rentLabel}
       onResetView={onResetView}
     />
   );

@@ -1,58 +1,71 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isInGreaterSydney } from "@/lib/geo";
 import { fetchOverpassAmenities } from "@/lib/overpass";
+import { rateLimit } from "@/lib/rate-limit";
 
-// ---------------------------------------------------------------------------
-// In-memory cache (24-hour TTL)
-// ---------------------------------------------------------------------------
+// Upstream is capped at 20 s (see API_CONFIG.overpass.timeout).
+export const maxDuration = 25;
 
-interface CachedResult {
-  data: unknown;
-  timestamp: number;
+const CACHE_CONTROL = "public, s-maxage=86400, stale-while-revalidate=604800";
+const DEFAULT_RADIUS_M = 3000;
+const MIN_RADIUS_M = 500;
+const MAX_RADIUS_M = 5000;
+
+function badRequest(error: string) {
+  return NextResponse.json(
+    { error },
+    { status: 400, headers: { "Cache-Control": "no-store" } },
+  );
 }
 
-const cache = new Map<string, CachedResult>();
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+/** Strict numeric parse: rejects null, "", whitespace and trailing junk. */
+function parseNumber(value: string | null): number {
+  if (value === null || value.trim() === "") return NaN;
+  return Number(value);
+}
 
-function getCached(key: string): unknown | null {
-  const entry = cache.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
-    cache.delete(key);
-    return null;
+/**
+ * GET /api/overpass-poi?lat=&lng=&radius=
+ *
+ * Live nearby-places lookup (OpenStreetMap via Overpass) for a point in
+ * Greater Sydney. GET with rounded coordinates so the CDN can cache it.
+ */
+export async function GET(request: NextRequest) {
+  const limited = rateLimit(request, "overpass", 20);
+  if (limited) return limited;
+
+  const params = request.nextUrl.searchParams;
+
+  // ~100 m precision: enough for a suburb, and it keeps cache keys shared.
+  const lat = Math.round(parseNumber(params.get("lat")) * 1000) / 1000;
+  const lng = Math.round(parseNumber(params.get("lng")) * 1000) / 1000;
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return badRequest("Missing or invalid lat/lng");
   }
-  return entry.data;
-}
+  if (!isInGreaterSydney(lat, lng)) {
+    return badRequest("Location is outside Greater Sydney");
+  }
 
-// ---------------------------------------------------------------------------
-// POST /api/overpass-poi
-// ---------------------------------------------------------------------------
+  let radius = DEFAULT_RADIUS_M;
+  if (params.has("radius")) {
+    const requested = parseNumber(params.get("radius"));
+    if (!Number.isFinite(requested)) {
+      return badRequest("radius must be a number of metres");
+    }
+    radius = Math.round(Math.min(MAX_RADIUS_M, Math.max(MIN_RADIUS_M, requested)));
+  }
 
-export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const lat = parseFloat(body.lat);
-    const lng = parseFloat(body.lng);
-    const radius = Math.min(body.radius ?? 3000, 5000);
-
-    if (isNaN(lat) || isNaN(lng)) {
-      return NextResponse.json(
-        { error: "Missing or invalid lat/lng" },
-        { status: 400 },
-      );
-    }
-
-    const key = `${lat.toFixed(3)}_${lng.toFixed(3)}_${radius}`;
-    const cached = getCached(key);
-    if (cached) {
-      return NextResponse.json(cached);
-    }
-
     const amenities = await fetchOverpassAmenities(lat, lng, radius);
-
-    cache.set(key, { data: amenities, timestamp: Date.now() });
-    return NextResponse.json(amenities);
+    return NextResponse.json(amenities, {
+      headers: { "Cache-Control": CACHE_CONTROL },
+    });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Internal error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("[overpass-poi] upstream lookup failed:", err);
+    return NextResponse.json(
+      { error: "Nearby places are temporarily unavailable. Please try again later." },
+      { status: 502, headers: { "Cache-Control": "no-store" } },
+    );
   }
 }

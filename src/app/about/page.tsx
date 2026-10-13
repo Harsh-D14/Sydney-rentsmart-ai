@@ -1,12 +1,36 @@
 import {
   Database,
-  Brain,
   BarChart3,
   Train,
   Home,
   Shield,
   ExternalLink,
+  Map,
+  MapPin,
+  ArrowUpDown,
 } from "lucide-react";
+import { stressBand } from "@/lib/stress";
+import { estimateCommuteMinutes } from "@/lib/geo";
+
+// ---------------------------------------------------------------------------
+// Figures taken from the code, so the page cannot drift from the behaviour
+// ---------------------------------------------------------------------------
+
+/** One sample percentage per band; labels and colours come from stress.ts. */
+const STRESS_BANDS = [
+  { range: "Under 25%", band: stressBand(20) },
+  { range: "25% to 30%", band: stressBand(27) },
+  { range: "Over 30%, up to 40%", band: stressBand(35) },
+  { range: "Over 40%", band: stressBand(45) },
+];
+
+const COMMUTE_EXAMPLES = [5, 10, 20, 30].map((km) => ({
+  km,
+  minutes: estimateCommuteMinutes(km),
+}));
+
+const STEP_NUMBER =
+  "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary";
 
 // ---------------------------------------------------------------------------
 // Data source cards
@@ -16,7 +40,7 @@ const DATA_SOURCES = [
   {
     title: "NSW Fair Trading Rental Bond Data",
     description:
-      "Over 1.6 million rental bond lodgements across Greater Sydney from 2021 to 2025. Includes weekly rent, postcode, dwelling type, and bedroom count for every new rental agreement lodged with NSW Fair Trading.",
+      "About 1.1 million rental bond lodgements across 237 Greater Sydney postcodes from 2021 to 2025. Includes weekly rent, postcode, dwelling type, and bedroom count for every new rental agreement lodged with NSW Fair Trading.",
     href: "https://www.fairtrading.nsw.gov.au/about-fair-trading/rental-bond-data",
     icon: Home,
   },
@@ -30,7 +54,7 @@ const DATA_SOURCES = [
   {
     title: "Transport for NSW Open Data",
     description:
-      "Train, metro, and ferry station locations across the Sydney network. Used to calculate nearest station distance and indicative commute times for each suburb.",
+      "Train, metro, light rail and ferry stop locations across the Sydney network, used for the nearest-station distances and the stations on the map. Public transport journey times on the suburb page come from the Transport for NSW Trip Planner.",
     href: "https://opendata.transport.nsw.gov.au/",
     icon: Train,
   },
@@ -40,6 +64,13 @@ const DATA_SOURCES = [
       "Postcode-to-suburb mapping with latitude and longitude coordinates, used for geospatial calculations, map rendering, and suburb name resolution.",
     href: "https://www.matthewproctor.com/australian_postcodes",
     icon: Database,
+  },
+  {
+    title: "OpenStreetMap",
+    description:
+      "The map tiles, the stored list of nearby hospitals, schools, universities, fire stations, police stations and childcare for each postcode, and the live points-of-interest lookup on each suburb page (supermarkets, parks, gyms, libraries, pharmacies and medical clinics within 3 km, fetched through the Overpass API). \u00a9 OpenStreetMap contributors.",
+    href: "https://www.openstreetmap.org/copyright",
+    icon: Map,
   },
 ] as const;
 
@@ -58,7 +89,7 @@ export default function AboutPage() {
           </h1>
           <p className="mx-auto mt-4 max-w-2xl text-base leading-relaxed text-blue-100/90 sm:text-lg">
             An open-data-powered tool helping Sydney renters make informed
-            decisions about where to live, based on real government data and AI.
+            decisions about where to live, based on real government data.
           </p>
         </div>
       </div>
@@ -73,21 +104,44 @@ export default function AboutPage() {
           </h2>
           <div className="mt-4 space-y-3 text-sm leading-relaxed text-slate-600 sm:text-base">
             <p>
-              Sydney RentSmart AI analyses over <strong>1.6 million rental bond
-              lodgements</strong> from NSW Fair Trading (2021&ndash;2025) and combines
-              them with <strong>ABS Census 2021 household income data</strong> to
-              help renters find suburbs that genuinely fit their budget.
+              Sydney RentSmart AI summarises about <strong>1.1 million rental
+              bond lodgements</strong> from NSW Fair Trading (2021&ndash;2025)
+              across <strong>237 Greater Sydney postcodes</strong>, and
+              combines them with <strong>ABS Census 2021 household income
+              data</strong>, to help renters find areas that fit what they can
+              pay.
             </p>
             <p>
-              Enter your annual income, desired bedroom count, and optionally your
-              workplace suburb. The tool instantly shows you suburbs where rent
-              stays within the recommended <strong>30% of gross income</strong>,
-              ranked by affordability, rental supply, or commute time.
+              Rents in the bond data are recorded by postcode, not by suburb.
+              So each postcode is treated as <strong>one area</strong>, named
+              after one of its suburbs, with the other suburbs it covers listed
+              alongside. Every suburb in a postcode shares the same rent
+              figures.
             </p>
+            <p>There are two ways to search:</p>
+            <ul className="space-y-2">
+              <li className="flex gap-2">
+                <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+                <span>
+                  <strong>Rent budget.</strong> Enter the most you want to pay
+                  in rent (per person, if you are sharing). You get the areas
+                  where the median rent for your dwelling size is at or under
+                  that amount.
+                </span>
+              </li>
+              <li className="flex gap-2">
+                <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+                <span>
+                  <strong>Income.</strong> Enter your income before tax. Each
+                  area shows the share of that income its median rent would
+                  take, rated against the <strong>30% rule</strong> below.
+                </span>
+              </li>
+            </ul>
             <p>
-              An AI-powered advisor (Claude by Anthropic) is available to answer
-              natural-language questions about the Sydney rental market, drawing on
-              the full processed dataset for accurate, data-driven responses.
+              You can also choose a bedroom count, how many people are
+              splitting the rent, and a workplace suburb to see distances and
+              commute times.
             </p>
           </div>
         </section>
@@ -113,23 +167,17 @@ export default function AboutPage() {
                 income on rent. A household exceeding this threshold is considered
                 to be in <em>housing stress</em>.
               </p>
+              <p className="mt-3 text-sm leading-relaxed text-slate-600">
+                In an income search, each area is rated by the share of your
+                income its median rent would take:
+              </p>
               <ul className="mt-3 space-y-1.5 text-xs text-slate-500">
-                <li className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                  &lt; 25% &mdash; Comfortable
-                </li>
-                <li className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-amber-500" />
-                  25&ndash;30% &mdash; Manageable
-                </li>
-                <li className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-orange-500" />
-                  30&ndash;40% &mdash; Stressed
-                </li>
-                <li className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-red-500" />
-                  &gt; 40% &mdash; Severe
-                </li>
+                {STRESS_BANDS.map(({ range, band }) => (
+                  <li key={band.rating} className="flex items-center gap-2">
+                    <span className={`h-2 w-2 rounded-full ${band.dot}`} />
+                    {range} &mdash; {band.label}
+                  </li>
+                ))}
               </ul>
             </div>
 
@@ -140,32 +188,91 @@ export default function AboutPage() {
                 How Recommendations Work
               </div>
               <p className="text-sm leading-relaxed text-slate-600">
-                When you enter your income and bedroom needs, we:
+                When you search, we:
               </p>
               <ol className="mt-3 space-y-2 text-sm text-slate-600">
                 <li className="flex gap-2">
-                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary">
-                    1
+                  <span className={STEP_NUMBER}>1</span>
+                  <span>
+                    Take the median rent for your bedroom count in each
+                    Greater Sydney postcode (2000&ndash;2234,
+                    2555&ndash;2770). If you are sharing, the dwelling size
+                    follows the number of people and the rent is split
+                    evenly.
                   </span>
-                  Calculate the median rent for your bedroom count in every
-                  Greater Sydney postcode (2000&ndash;2234, 2555&ndash;2770).
                 </li>
                 <li className="flex gap-2">
-                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary">
-                    2
+                  <span className={STEP_NUMBER}>2</span>
+                  <span>
+                    <strong>Rent budget:</strong> keep the areas where that
+                    rent is at or under your budget.{" "}
+                    <strong>Income:</strong> work out the rent as a share of
+                    your income, and leave out any area where it would be more
+                    than your whole income.
                   </span>
-                  Compute your rent-to-income ratio for each suburb and filter
-                  out anything above 50% (unlikely to be viable).
                 </li>
                 <li className="flex gap-2">
-                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary">
-                    3
+                  <span className={STEP_NUMBER}>3</span>
+                  <span>
+                    Show <strong>one result per postcode</strong>, with
+                    dwelling mix, nearest station, nearby amenities and, if
+                    you gave a workplace, the distance and commute.
                   </span>
-                  Rank the remaining suburbs by affordability and return the top
-                  20 with rent trends, dwelling types, nearest station, and
-                  commute estimates.
                 </li>
               </ol>
+            </div>
+
+            {/* Card: Ranking */}
+            <div className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-sm">
+              <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-primary">
+                <ArrowUpDown className="h-4 w-4" />
+                Ranking the Results
+              </div>
+              <p className="text-sm leading-relaxed text-slate-600">
+                Results can be ordered four ways:
+              </p>
+              <ul className="mt-3 space-y-1.5 text-sm text-slate-600">
+                <li>
+                  <strong>Overall score</strong> &mdash; a combined score of
+                  affordability, amenities and rental supply, plus commute
+                  when you give a workplace
+                </li>
+                <li>
+                  <strong>Commute</strong> &mdash; shortest commute to your
+                  workplace (when you give one)
+                </li>
+                <li>
+                  <strong>Affordability</strong> &mdash; lowest rent relative
+                  to your income or budget
+                </li>
+                <li>
+                  <strong>Lowest rent</strong> &mdash; cheapest weekly rent
+                </li>
+              </ul>
+              <p className="mt-3 text-xs leading-relaxed text-slate-500">
+                With a workplace, the first three look only at areas within a
+                set straight-line distance of it (25, 20 and 40 km). Lowest
+                rent always covers all of Sydney.
+              </p>
+            </div>
+
+            {/* Card: Postcode areas and sample size */}
+            <div className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-sm">
+              <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-primary">
+                <MapPin className="h-4 w-4" />
+                Postcode Areas &amp; Small Samples
+              </div>
+              <p className="text-sm leading-relaxed text-slate-600">
+                Rent, bond count, income and rent-stress figures are all
+                measured for a whole postcode. A suburb page says which
+                postcode its figures are for and which other suburbs that
+                postcode covers.
+              </p>
+              <p className="mt-3 text-sm leading-relaxed text-slate-600">
+                A median built from few bonds is unreliable. Areas with{" "}
+                <strong>fewer than 100 bonds</strong> are flagged as a small
+                sample and should be read as indicative only.
+              </p>
             </div>
 
             {/* Card: Commute */}
@@ -175,38 +282,34 @@ export default function AboutPage() {
                 Commute Estimates
               </div>
               <p className="text-sm leading-relaxed text-slate-600">
-                Commute times are <strong>indicative estimates</strong> based on
-                straight-line (Haversine) distance between suburb centroids. They
-                are not route-based and do not account for traffic, transit
-                schedules, or transfers.
+                Commute times start as <strong>indicative estimates</strong>{" "}
+                worked out from the straight-line (Haversine) distance between
+                an area and your workplace. They do not account for roads,
+                traffic, timetables or transfers:
               </p>
               <ul className="mt-3 space-y-1 text-xs text-slate-500">
-                <li>&lt; 5 km &rarr; ~15&ndash;20 min</li>
-                <li>5&ndash;15 km &rarr; ~20&ndash;35 min</li>
-                <li>15&ndash;30 km &rarr; ~35&ndash;50 min</li>
-                <li>30+ km &rarr; ~50&ndash;70 min</li>
+                {COMMUTE_EXAMPLES.map(({ km, minutes }) => (
+                  <li key={km}>
+                    {km} km &rarr; ~{minutes} min
+                  </li>
+                ))}
               </ul>
+              <p className="mt-3 text-sm leading-relaxed text-slate-600">
+                Where a routing service responds (
+                <a
+                  href="https://openrouteservice.org/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium text-primary underline-offset-2 hover:underline"
+                >
+                  OpenRouteService
+                </a>{" "}
+                is tried first), a <strong>routed driving time</strong>{" "}
+                replaces the estimate. The suburb page also shows a public
+                transport time when one is available.
+              </p>
             </div>
 
-            {/* Card: AI Advisor */}
-            <div className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-sm">
-              <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-primary">
-                <Brain className="h-4 w-4" />
-                AI-Powered Advisor
-              </div>
-              <p className="text-sm leading-relaxed text-slate-600">
-                The built-in chat advisor is powered by{" "}
-                <strong>Claude by Anthropic</strong>. It receives a comprehensive
-                summary of the processed rental data (medians, trends, cheapest
-                &amp; most expensive suburbs, supply statistics) as context, so
-                its answers are grounded in real numbers &mdash; not just general
-                knowledge.
-              </p>
-              <p className="mt-2 text-sm text-slate-600">
-                When you&apos;ve already run a search, the AI also receives your
-                income and bedroom preferences so it can give personalised advice.
-              </p>
-            </div>
           </div>
         </section>
 
@@ -218,8 +321,9 @@ export default function AboutPage() {
             Data Sources
           </h2>
           <p className="mt-2 text-sm text-slate-500">
-            All data used in this project is publicly available under open
-            government licences.
+            The sources below are publicly available. OpenStreetMap data is
+            &copy; OpenStreetMap contributors and licensed under the Open
+            Database Licence.
           </p>
 
           <div className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -263,12 +367,36 @@ export default function AboutPage() {
             </li>
             <li className="flex gap-2">
               <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
+              Rent figures are for whole postcodes. Suburbs that share a postcode
+              show the same figures, even where their rents differ in practice.
+            </li>
+            <li className="flex gap-2">
+              <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
+              Areas with fewer than 100 bonds are flagged as a small sample; their
+              medians can be skewed by a handful of tenancies.
+            </li>
+            <li className="flex gap-2">
+              <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
               Census income data is from 2021 and may not reflect current incomes.
             </li>
             <li className="flex gap-2">
               <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
-              Commute times are rough estimates based on distance, not actual
-              transit routing or traffic conditions.
+              The 30% benchmark is measured against income before tax. In a rent
+              budget search no stress rating is given, because no income is
+              entered.
+            </li>
+            <li className="flex gap-2">
+              <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
+              Most commute times are rough estimates based on straight-line
+              distance, not actual routing, timetables or traffic conditions.
+              Routed and public transport times depend on outside services and
+              are not always available.
+            </li>
+            <li className="flex gap-2">
+              <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
+              Nearby amenities are only as complete as OpenStreetMap is for an
+              area, and the live points-of-interest lookup also depends on the
+              Overpass service responding.
             </li>
             <li className="flex gap-2">
               <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />

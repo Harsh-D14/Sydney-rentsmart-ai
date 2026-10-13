@@ -1,130 +1,75 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchOrsDirections } from "@/lib/ors-directions";
+import { estimateCommuteMinutes, haversineKm } from "@/lib/geo";
+import { fetchOrsDirections, isOrsConfigured } from "@/lib/ors-directions";
+import { rateLimit } from "@/lib/rate-limit";
+import {
+  CACHE_NONE,
+  CACHE_REAL,
+  parseRoutePoints,
+  type RoutePoints,
+} from "@/lib/route-params";
+import {
+  nextSydneyWeekday,
+  parseTransitJourneys,
+  TRANSIT_DEPARTURE_TIME,
+  type TransitResult,
+} from "@/lib/tfnsw-trip";
+
+// Worst case is ORS (10 s) then the Google fallback (8 s), with TfNSW (8 s)
+// running alongside; leave headroom for cold start.
+export const maxDuration = 30;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-interface TransitResult {
-  duration_min: number;
-  transfers: number;
-  modes: string[];
-  summary: string;
-  departure: string;
-  arrival: string;
-}
+/** Generic failure codes sent to the client. Details stay in server logs. */
+type LookupError = "unavailable" | "not_configured";
 
 interface DrivingResult {
   duration_min: number;
   distance_km: number;
   traffic_note: string;
+  /** True only for the straight-line fallback, never for a routed answer. */
+  is_estimate: boolean;
 }
 
 interface CommuteResponse {
   transit: TransitResult | null;
-  transit_error?: string;
+  transit_error?: LookupError;
   driving: DrivingResult | null;
-  driving_error?: string;
+  driving_error?: LookupError;
   straight_line_km: number;
 }
 
-interface CachedResult {
-  data: CommuteResponse;
-  timestamp: number;
-}
+type Lookup<T> = { result: T; error?: undefined } | { result: null; error: LookupError };
 
-// ---------------------------------------------------------------------------
-// In-memory cache (24-hour TTL)
-// ---------------------------------------------------------------------------
-
-const cache = new Map<string, CachedResult>();
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-
-function cacheKey(
-  fromLat: number,
-  fromLng: number,
-  toLat: number,
-  toLng: number,
-): string {
-  return `${fromLat.toFixed(2)}_${fromLng.toFixed(2)}_${toLat.toFixed(2)}_${toLng.toFixed(2)}`;
-}
-
-function getCached(key: string): CommuteResponse | null {
-  const entry = cache.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
-    cache.delete(key);
-    return null;
-  }
-  return entry.data;
-}
-
-// ---------------------------------------------------------------------------
-// Haversine
-// ---------------------------------------------------------------------------
-
-function haversineKm(
-  lat1: number,
-  lng1: number,
-  lat2: number,
-  lng2: number,
-): number {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLng = ((lng2 - lng1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-// ---------------------------------------------------------------------------
-// Date helpers
-// ---------------------------------------------------------------------------
-
-function getNextWeekdayFormatted(): string {
-  const now = new Date();
-  const day = now.getDay(); // 0=Sun, 6=Sat
-  // If weekend, advance to Monday
-  if (day === 0) now.setDate(now.getDate() + 1);
-  else if (day === 6) now.setDate(now.getDate() + 2);
-
-  const yyyy = now.getFullYear();
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const dd = String(now.getDate()).padStart(2, "0");
-  return `${yyyy}${mm}${dd}`;
-}
+const UPSTREAM_TIMEOUT_MS = 8000;
 
 // ---------------------------------------------------------------------------
 // TfNSW Trip Planner
 // ---------------------------------------------------------------------------
 
-async function fetchTransit(
-  fromLat: number,
-  fromLng: number,
-  toLat: number,
-  toLng: number,
-): Promise<TransitResult> {
+async function fetchTransit(p: RoutePoints): Promise<Lookup<TransitResult>> {
   const apiKey = process.env.TFNSW_API_KEY;
-  if (!apiKey) throw new Error("TFNSW_API_KEY not configured");
+  if (!apiKey) return { result: null, error: "not_configured" };
 
   const params = new URLSearchParams({
     outputFormat: "rapidJSON",
     coordOutputFormat: "EPSG:4326",
     type_origin: "coord",
-    name_origin: `${fromLng}:${fromLat}:EPSG:4326`,
+    name_origin: `${p.fromLng}:${p.fromLat}:EPSG:4326`,
     type_destination: "coord",
-    name_destination: `${toLng}:${toLat}:EPSG:4326`,
+    name_destination: `${p.toLng}:${p.toLat}:EPSG:4326`,
     depArrMacro: "dep",
-    itdDate: getNextWeekdayFormatted(),
-    itdTime: "0800",
+    // TfNSW reads both of these as Sydney local time
+    itdDate: nextSydneyWeekday(),
+    itdTime: TRANSIT_DEPARTURE_TIME,
     calcNumberOfTrips: "3",
   });
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
 
   try {
     const resp = await fetch(
@@ -137,101 +82,19 @@ async function fetchTransit(
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
-      throw new Error(`TfNSW API ${resp.status}: ${text.slice(0, 200)}`);
+      console.error(`TfNSW trip ${resp.status}: ${text.slice(0, 200)}`);
+      return { result: null, error: "unavailable" };
     }
 
-    const data = await resp.json();
-    const journeys = data?.journeys;
-    if (!journeys || journeys.length === 0) {
-      throw new Error("No transit journeys found");
+    const result = parseTransitJourneys(await resp.json());
+    if (!result) {
+      console.error("TfNSW trip: no usable journey in response");
+      return { result: null, error: "unavailable" };
     }
-
-    // Pick the first (best) journey
-    const journey = journeys[0];
-    const legs = journey.legs ?? [];
-
-    // Total duration from first departure to last arrival
-    const firstDep = new Date(legs[0]?.origin?.departureTimePlanned);
-    const lastArr = new Date(legs[legs.length - 1]?.destination?.arrivalTimePlanned);
-    const durationMin = Math.round((lastArr.getTime() - firstDep.getTime()) / 60000);
-
-    // Transport modes (exclude walking for transfer count)
-    const transitLegs = legs.filter(
-      (l: { transportation?: { product?: { class?: number } } }) => {
-        const cls = l.transportation?.product?.class;
-        // TfNSW class 100 = walking/footpath
-        return cls !== undefined && cls !== 100 && cls !== 99;
-      },
-    );
-
-    const modeMap: Record<number, string> = {
-      1: "train",
-      2: "metro",
-      4: "light_rail",
-      5: "bus",
-      9: "ferry",
-      11: "school_bus",
-    };
-
-    const modes = new Set<string>();
-    const stationNames: string[] = [];
-
-    for (const leg of transitLegs) {
-      const cls = leg.transportation?.product?.class as number | undefined;
-      if (cls !== undefined && modeMap[cls]) {
-        modes.add(modeMap[cls]);
-      }
-      const destName = leg.destination?.name;
-      if (destName && typeof destName === "string") {
-        stationNames.push(destName.split(",")[0].trim());
-      }
-    }
-
-    // Always include walking in modes if there are walking legs
-    const hasWalking = legs.some(
-      (l: { transportation?: { product?: { class?: number } } }) =>
-        l.transportation?.product?.class === 100 ||
-        l.transportation?.product?.class === 99,
-    );
-    if (hasWalking) modes.add("walking");
-
-    const transfers = Math.max(0, transitLegs.length - 1);
-
-    // Summary: primary mode via key stations
-    const primaryMode =
-      modes.has("train") ? "Train" :
-      modes.has("metro") ? "Metro" :
-      modes.has("light_rail") ? "Light Rail" :
-      modes.has("ferry") ? "Ferry" :
-      modes.has("bus") ? "Bus" :
-      "Transit";
-
-    const viaPart =
-      stationNames.length > 0
-        ? ` via ${stationNames.slice(0, 2).join(" → ")}`
-        : "";
-    const summary = `${primaryMode}${viaPart}`;
-
-    // Format departure/arrival times
-    const depStr = firstDep.toLocaleTimeString("en-AU", {
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-    });
-    const arrStr = lastArr.toLocaleTimeString("en-AU", {
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-    });
-
-    return {
-      duration_min: durationMin > 0 ? durationMin : 0,
-      transfers,
-      modes: Array.from(modes),
-      summary,
-      departure: depStr,
-      arrival: arrStr,
-    };
+    return { result };
+  } catch (err) {
+    console.error("TfNSW trip error:", err);
+    return { result: null, error: "unavailable" };
   } finally {
     clearTimeout(timeout);
   }
@@ -241,91 +104,113 @@ async function fetchTransit(
 // ORS Directions API (primary) → Google Routes API (fallback)
 // ---------------------------------------------------------------------------
 
-async function fetchDriving(
-  fromLat: number,
-  fromLng: number,
-  toLat: number,
-  toLng: number,
+async function fetchGoogleDriving(
+  p: RoutePoints,
+  googleKey: string,
 ): Promise<DrivingResult> {
-  // Try ORS first (uses OPENROUTE_API_KEY)
-  const orsKey = process.env.OPENROUTE_API_KEY;
-  if (orsKey) {
-    try {
-      const result = await fetchOrsDirections(fromLat, fromLng, toLat, toLng, "driving");
-      return {
-        duration_min: result.duration_minutes,
-        distance_km: result.distance_km,
-        traffic_note: "typical conditions (ORS)",
-      };
-    } catch {
-      // Fall through to Google or haversine fallback
-    }
-  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
 
-  // Fallback: Google Routes API
-  const googleKey = process.env.GOOGLE_MAPS_API_KEY;
-  if (googleKey) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-
-    try {
-      const resp = await fetch(
-        "https://routes.googleapis.com/directions/v2:computeRoutes",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Goog-Api-Key": googleKey,
-            "X-Goog-FieldMask":
-              "routes.duration,routes.distanceMeters,routes.staticDuration",
-          },
-          body: JSON.stringify({
-            origin: {
-              location: {
-                latLng: { latitude: fromLat, longitude: fromLng },
-              },
-            },
-            destination: {
-              location: {
-                latLng: { latitude: toLat, longitude: toLng },
-              },
-            },
-            travelMode: "DRIVE",
-            routingPreference: "TRAFFIC_AWARE",
-          }),
-          signal: controller.signal,
+  try {
+    const resp = await fetch(
+      "https://routes.googleapis.com/directions/v2:computeRoutes",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": googleKey,
+          "X-Goog-FieldMask":
+            "routes.duration,routes.distanceMeters,routes.staticDuration",
         },
+        body: JSON.stringify({
+          origin: {
+            location: {
+              latLng: { latitude: p.fromLat, longitude: p.fromLng },
+            },
+          },
+          destination: {
+            location: {
+              latLng: { latitude: p.toLat, longitude: p.toLng },
+            },
+          },
+          travelMode: "DRIVE",
+          // Answers are cached for a day, so live traffic would go stale
+          routingPreference: "TRAFFIC_UNAWARE",
+        }),
+        signal: controller.signal,
+      },
+    );
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      console.error(`Google Routes ${resp.status}: ${text.slice(0, 200)}`);
+      throw new Error(`Google Routes responded ${resp.status}`);
+    }
+
+    const data = await resp.json();
+    const route = data?.routes?.[0];
+    if (!route) throw new Error("Google Routes returned no route");
+
+    // Durations arrive as strings like "1234s"
+    const durationStr: unknown = route.duration ?? route.staticDuration;
+    const durationSec =
+      typeof durationStr === "string" ? parseInt(durationStr, 10) : NaN;
+    if (!Number.isFinite(durationSec)) {
+      throw new Error("Google Routes returned no duration");
+    }
+
+    const distanceM = typeof route.distanceMeters === "number" ? route.distanceMeters : 0;
+    const isTrafficAware = route.duration && route.duration !== route.staticDuration;
+
+    return {
+      duration_min: Math.round(durationSec / 60),
+      distance_km: Math.round(distanceM / 100) / 10,
+      traffic_note: isTrafficAware ? "with current traffic" : "typical conditions",
+      is_estimate: false,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchDriving(p: RoutePoints): Promise<Lookup<DrivingResult>> {
+  const googleKey = process.env.GOOGLE_MAPS_API_KEY;
+  if (!isOrsConfigured() && !googleKey) {
+    return { result: null, error: "not_configured" };
+  }
+
+  if (isOrsConfigured()) {
+    try {
+      const result = await fetchOrsDirections(
+        p.fromLat,
+        p.fromLng,
+        p.toLat,
+        p.toLng,
+        "driving",
       );
-
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => "");
-        throw new Error(`Google Routes API ${resp.status}: ${text.slice(0, 200)}`);
-      }
-
-      const data = await resp.json();
-      const route = data?.routes?.[0];
-      if (!route) throw new Error("No driving route found");
-
-      const durationStr: string = route.duration ?? route.staticDuration ?? "0s";
-      const durationSec = parseInt(durationStr.replace("s", ""), 10) || 0;
-      const durationMin = Math.round(durationSec / 60);
-
-      const distanceM: number = route.distanceMeters ?? 0;
-      const distanceKm = Math.round(distanceM / 100) / 10;
-
-      const isTrafficAware = route.duration && route.duration !== route.staticDuration;
-
       return {
-        duration_min: durationMin,
-        distance_km: distanceKm,
-        traffic_note: isTrafficAware ? "with current traffic" : "typical conditions",
+        result: {
+          duration_min: result.duration_minutes,
+          distance_km: result.distance_km,
+          traffic_note: "typical conditions (ORS)",
+          is_estimate: false,
+        },
       };
-    } finally {
-      clearTimeout(timeout);
+    } catch (err) {
+      console.error("ORS driving lookup failed:", err);
+      // Fall through to Google
     }
   }
 
-  throw new Error("No driving API configured (set OPENROUTE_API_KEY or GOOGLE_MAPS_API_KEY)");
+  if (googleKey) {
+    try {
+      return { result: await fetchGoogleDriving(p, googleKey) };
+    } catch (err) {
+      console.error("Google driving lookup failed:", err);
+    }
+  }
+
+  return { result: null, error: "unavailable" };
 }
 
 // ---------------------------------------------------------------------------
@@ -333,68 +218,70 @@ async function fetchDriving(
 // ---------------------------------------------------------------------------
 
 export async function GET(request: NextRequest) {
-  try {
-    const params = request.nextUrl.searchParams;
-    const fromLat = parseFloat(params.get("from_lat") ?? "");
-    const fromLng = parseFloat(params.get("from_lng") ?? "");
-    const toLat = parseFloat(params.get("to_lat") ?? "");
-    const toLng = parseFloat(params.get("to_lng") ?? "");
+  const limited = rateLimit(request, "commute", 60);
+  if (limited) return limited;
 
-    if ([fromLat, fromLng, toLat, toLng].some(isNaN)) {
-      return NextResponse.json(
-        { error: "Missing or invalid params: from_lat, from_lng, to_lat, to_lng" },
-        { status: 400 },
-      );
-    }
+  const parsed = parseRoutePoints(request.nextUrl.searchParams);
+  if (!parsed.ok) {
+    return NextResponse.json(
+      { error: parsed.error },
+      { status: 400, headers: { "Cache-Control": CACHE_NONE } },
+    );
+  }
+
+  try {
+    const points = parsed.points;
 
     // Straight-line distance (always available)
-    const straightLineKm =
-      Math.round(haversineKm(fromLat, fromLng, toLat, toLng) * 10) / 10;
+    const exactKm = haversineKm(
+      points.fromLat,
+      points.fromLng,
+      points.toLat,
+      points.toLng,
+    );
+    const straightLineKm = Math.round(exactKm * 10) / 10;
 
-    // Check cache
-    const key = cacheKey(fromLat, fromLng, toLat, toLng);
-    const cached = getCached(key);
-    if (cached) {
-      return NextResponse.json(cached);
-    }
-
-    // Fetch transit + driving in parallel
-    const [transitResult, drivingResult] = await Promise.allSettled([
-      fetchTransit(fromLat, fromLng, toLat, toLng),
-      fetchDriving(fromLat, fromLng, toLat, toLng),
+    // Fetch transit + driving in parallel (neither lookup throws)
+    const [transit, driving] = await Promise.all([
+      fetchTransit(points),
+      fetchDriving(points),
     ]);
 
     const response: CommuteResponse = {
-      transit: null,
-      driving: null,
+      transit: transit.result,
+      driving: driving.result,
       straight_line_km: straightLineKm,
     };
 
-    if (transitResult.status === "fulfilled") {
-      response.transit = transitResult.value;
-    } else {
-      response.transit_error = transitResult.reason?.message ?? "Transit lookup failed";
-    }
+    if (transit.error) response.transit_error = transit.error;
 
-    if (drivingResult.status === "fulfilled") {
-      response.driving = drivingResult.value;
-    } else {
-      response.driving_error = drivingResult.reason?.message ?? "Driving lookup failed";
-      // Fallback: estimate driving from haversine
-      const estimatedMin = Math.round(straightLineKm * 2);
+    if (driving.error) {
+      response.driving_error = driving.error;
+      // Fallback: indicative time from straight-line distance, flagged as such
       response.driving = {
-        duration_min: estimatedMin,
-        distance_km: Math.round(straightLineKm * 1.3 * 10) / 10,
+        duration_min: estimateCommuteMinutes(exactKm),
+        distance_km: Math.round(exactKm * 1.3 * 10) / 10,
         traffic_note: "estimate (API unavailable)",
+        is_estimate: true,
       };
     }
 
-    // Cache the result
-    cache.set(key, { data: response, timestamp: Date.now() });
+    // Cache only a fully real answer: driving was routed by an API, and
+    // transit either succeeded or is switched off by configuration (a stable
+    // state, unlike an outage). Anything else is a temporary degradation that
+    // must not be pinned in the CDN for a day.
+    const drivingIsReal = !driving.error;
+    const transitIsSettled = !transit.error || transit.error === "not_configured";
+    const cacheControl = drivingIsReal && transitIsSettled ? CACHE_REAL : CACHE_NONE;
 
-    return NextResponse.json(response);
+    return NextResponse.json(response, {
+      headers: { "Cache-Control": cacheControl },
+    });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Internal error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("GET /api/commute error:", err);
+    return NextResponse.json(
+      { error: "Commute lookup failed" },
+      { status: 500, headers: { "Cache-Control": CACHE_NONE } },
+    );
   }
 }

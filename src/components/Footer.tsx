@@ -12,7 +12,7 @@ export default function Footer() {
             </p>
             <p className="mt-2 text-xs leading-relaxed text-slate-400">
               Empowering Sydney renters with transparent, data-driven insights.
-              Built for the NSW Government GovHack challenge.
+              Built for the Western Sydney AI Summit at WSTI.
             </p>
           </div>
 
@@ -52,6 +52,16 @@ export default function Footer() {
                   Transport for NSW Open Data
                 </a>
               </li>
+              <li>
+                <a
+                  href="https://www.openstreetmap.org/copyright"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="transition-colors hover:text-primary"
+                >
+                  OpenStreetMap
+                </a>
+              </li>
             </ul>
           </div>
 
@@ -61,16 +71,6 @@ export default function Footer() {
               Powered By
             </p>
             <ul className="mt-2 space-y-1.5 text-xs text-slate-400">
-              <li>
-                <a
-                  href="https://www.anthropic.com"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="transition-colors hover:text-primary"
-                >
-                  Claude AI by Anthropic
-                </a>
-              </li>
               <li>Next.js &middot; React &middot; Leaflet</li>
               <li>
                 <Link href="/about" className="transition-colors hover:text-primary">

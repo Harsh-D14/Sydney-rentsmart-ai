@@ -7,21 +7,20 @@ export const API_CONFIG = {
     apiKey: process.env.OPENROUTE_API_KEY || "",
     baseUrl: "https://api.openrouteservice.org",
     endpoints: {
-      matrix: "/v2/matrix/driving-car",
       directionsJson: "/v2/directions/driving-car",
       directionsCycling: "/v2/directions/cycling-regular",
-      isochrones: "/v2/isochrones/driving-car",
-      poi: "/pois",
     },
     coordOrder: "lng-lat" as const,
   },
   overpass: {
     baseUrl: "https://overpass-api.de/api/interpreter",
-    timeout: 60,
+    /** Seconds. Used for both the Overpass QL [timeout:] and the fetch abort. */
+    timeout: 20,
+    userAgent: "SydneyRentSmartAI/1.0 (suburb nearby-places lookup)",
   },
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY || "",
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-4-5-20250929",
   },
 };
 

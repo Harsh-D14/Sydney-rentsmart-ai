@@ -1,15 +1,126 @@
+// ---------------------------------------------------------------------------
+// GET /api/recommend — affordable areas, ONE RESULT PER POSTCODE
+//
+// Rent data is measured per postcode, so each result is a postcode area named
+// after its representative suburb, with the other suburbs it covers listed in
+// `suburb_names`. Postcodes with no coordinates (three unnamed ones with at
+// most 5 bonds) are never returned, so lat/lng are always numbers.
+//
+// Query params
+//   income         required  positive number, weekly $ (meaning set by `mode`)
+//   mode           optional  "income" (default) | "budget"
+//                              income: `income` is weekly income. Stress =
+//                                per-person rent / income. Areas over 100%
+//                                are left out.
+//                              budget: `income` is the MAXIMUM WEEKLY RENT
+//                                (per person when sharing). Only areas with
+//                                per-person rent <= budget are returned.
+//   bedrooms       optional  integer 1-5 (5 = 5+). Ignored when sharing > 1.
+//   sharing        optional  integer 1-4, default 1. People splitting the rent.
+//   share_bedroom  optional  "1": two people sharing one bedroom
+//   workplace      optional  free text, max 100 chars: suburb name,
+//                            "Name (2150)", postcode, or "CBD"
+//
+// 200 response
+//   {
+//     income_weekly: number,            // echo of `income` (the budget in budget mode)
+//     mode: "income" | "budget",
+//     bedrooms: number | "overall",
+//     sharing_mode: number,             // 1-4
+//     workplace: string | null,         // resolved suburb name
+//     workplace_query: string | null,   // raw text as sent (trimmed)
+//     workplace_resolved: boolean,      // false when text was sent but nothing matched
+//     workplace_postcode: string | null,
+//     workplace_suburb_key: string | null,
+//     workplace_lat: number | null,
+//     workplace_lng: number | null,
+//     total_matching: number,           // === suburbs.length
+//     suburbs: Array<{
+//       postcode: string,
+//       suburb_key: string,             // representative suburb, links to /suburb/[key]
+//       suburb_name: string,            // representative suburb
+//       suburb_names: string[],         // all real suburb names in the postcode, A-Z
+//       lat: number, lng: number,       // postcode centroid
+//       median_rent: number,            // per-person weekly rent (same as per_person_rent)
+//       rent_stress_pct: number,        // 1 decimal. income mode: % of income.
+//                                       //            budget mode: % of budget.
+//       rating: "comfortable" | "manageable" | "stressed" | "severe" | null,
+//                                       // null in budget mode
+//       total_bonds: number,
+//       low_sample: boolean,            // true when total_bonds < 100
+//       rent_trend: Record<year, number>,
+//       dwelling_types: Record<type, percent>,
+//       nearest_station: { name, distance_km, type, lines: string[] } | null,
+//                                       // measured from the centroid
+//       sharing_mode: number,
+//       total_rent: number,             // whole-dwelling weekly rent
+//       per_person_rent: number,
+//       solo_rent: number | null,       // 1-bed (else overall) rent; null when not sharing
+//       savings_vs_solo: number | null, // solo_rent - per_person_rent; null when not sharing
+//       rent_estimated: boolean,        // true when a smaller dwelling stood in
+//       is_workplace: boolean,          // workplace is in this postcode
+//       distance_to_workplace_km: number | null, // centroid to workplace, 1 decimal
+//       amenities: AmenitySummary | null,        // null = no amenity data
+//       amenity_score: number | null,            // 0-100; null = no amenity data
+//     }>                                // sorted by rent_stress_pct ascending
+//   }
+//
+// 400 { error: string } for invalid params. Successful responses depend only
+// on the query string and static data, so they are cached at the CDN.
+// ---------------------------------------------------------------------------
+
 import { NextRequest, NextResponse } from "next/server";
 import {
-  getAllSuburbs,
-  getSuburbByPostcode,
-  calculateRentStress,
+  getPostcodeAreas,
+  hasCentroid,
   medianRentKey,
-  searchSuburbs,
-  type Suburb,
+  resolveWorkplace,
+  type PostcodeArea,
+  type RentField,
 } from "@/lib/suburbs";
-import { getNearestStation, estimateCommuteTime } from "@/lib/commute";
+import { getRentStressRating, type RentStressRating } from "@/lib/stress";
+import { getNearestStation } from "@/lib/commute";
+import { haversineKm } from "@/lib/geo";
+import { getAmenitySummary, getAmenityScore, type AmenitySummary } from "@/lib/amenities";
 
-const MAX_RESULTS = 1000; // return enough for all client-side sort modes
+const CACHE_CONTROL = "public, s-maxage=3600, stale-while-revalidate=86400";
+const MAX_WORKPLACE_LENGTH = 100;
+
+type Mode = "income" | "budget";
+
+interface RecommendedArea {
+  postcode: string;
+  suburb_key: string;
+  suburb_name: string;
+  suburb_names: string[];
+  lat: number;
+  lng: number;
+  median_rent: number;
+  rent_stress_pct: number;
+  rating: RentStressRating | null;
+  total_bonds: number;
+  low_sample: boolean;
+  rent_trend: Record<string, number>;
+  dwelling_types: Record<string, number>;
+  nearest_station: { name: string; distance_km: number; type: string; lines: string[] } | null;
+  // Sharing fields
+  sharing_mode: number;
+  total_rent: number;
+  per_person_rent: number;
+  solo_rent: number | null;
+  savings_vs_solo: number | null;
+  rent_estimated: boolean;
+  // Workplace fields
+  is_workplace: boolean;
+  distance_to_workplace_km: number | null;
+  // Amenity fields (null = no amenity data for the postcode)
+  amenities: AmenitySummary | null;
+  amenity_score: number | null;
+}
+
+function badRequest(message: string) {
+  return NextResponse.json({ error: message }, { status: 400 });
+}
 
 /**
  * Resolve the rent field + per-person divisor for sharing mode.
@@ -20,259 +131,172 @@ const MAX_RESULTS = 1000; // return enough for all client-side sort modes
  * sharing=4: use 4-bed rent ÷ 4
  *
  * Fallback: if the preferred bedroom data is null, try the next lower
- * bedroom count and flag rent_estimated=true.
+ * bedroom count and flag rentEstimated=true.
  */
 function resolveSharedRent(
-  suburb: Suburb,
+  area: PostcodeArea,
   userBedrooms: number | null,
   sharingCount: number,
   shareBedroom: boolean,
-): { totalRent: number | null; perPersonRent: number; rentEstimated: boolean; bedsUsed: number } | null {
+): { totalRent: number; perPersonRent: number; rentEstimated: boolean } | null {
   if (sharingCount <= 1) {
-    // Solo mode — original behaviour
-    const key = userBedrooms ? medianRentKey(userBedrooms) : "median_rent_overall";
-    const rent = suburb[key] as number | null;
-    if (rent === null) return null;
-    return { totalRent: rent, perPersonRent: rent, rentEstimated: false, bedsUsed: userBedrooms ?? 0 };
+    const key: RentField = userBedrooms ? medianRentKey(userBedrooms) : "median_rent_overall";
+    const rent = area[key];
+    if (rent == null) return null;
+    return { totalRent: rent, perPersonRent: rent, rentEstimated: false };
   }
 
-  // Shared mode — determine which bedroom count to look up
-  let targetBeds: number;
-  if (sharingCount === 2 && shareBedroom) {
-    targetBeds = 1; // couples sharing a bedroom
-  } else {
-    targetBeds = Math.min(sharingCount, 4);
-  }
+  // Shared mode: which bedroom count to look up
+  const coupleInOneRoom = sharingCount === 2 && shareBedroom;
+  const targetBeds = coupleInOneRoom ? 1 : Math.min(sharingCount, 4);
 
   // Minimum bedroom guardrails
-  const minBeds = sharingCount === 2 && shareBedroom ? 1 : sharingCount >= 4 ? 3 : sharingCount >= 3 ? 2 : 1;
+  const minBeds = coupleInOneRoom ? 1 : sharingCount >= 4 ? 3 : sharingCount >= 3 ? 2 : 1;
 
   // Try target beds, then fall back downward
-  let rent: number | null = null;
-  let bedsUsed = targetBeds;
-  let estimated = false;
-
   for (let beds = targetBeds; beds >= minBeds; beds--) {
-    const key = medianRentKey(beds);
-    const val = suburb[key] as number | null;
-    if (val !== null) {
-      rent = val;
-      bedsUsed = beds;
-      estimated = beds !== targetBeds;
-      break;
+    const rent = area[medianRentKey(beds)];
+    if (rent != null) {
+      return {
+        totalRent: rent,
+        perPersonRent: Math.round((rent / sharingCount) * 10) / 10,
+        rentEstimated: beds !== targetBeds,
+      };
     }
   }
 
-  if (rent === null) return null;
-
-  const perPerson = Math.round((rent / sharingCount) * 10) / 10;
-  return { totalRent: rent, perPersonRent: perPerson, rentEstimated: estimated, bedsUsed };
+  return null;
 }
 
 export async function GET(request: NextRequest) {
   try {
     const params = request.nextUrl.searchParams;
-    const incomeStr = params.get("income");
-    const bedroomsStr = params.get("bedrooms");
 
     // --- Validation ---
+    const incomeStr = params.get("income");
     if (!incomeStr) {
-      return NextResponse.json(
-        { error: "Missing required param: income (weekly $)" },
-        { status: 400 },
-      );
+      return badRequest("Missing required param: income (weekly $)");
     }
-
     const income = Number(incomeStr);
-    if (isNaN(income) || income <= 0) {
-      return NextResponse.json(
-        { error: "income must be a positive number (weekly $)" },
-        { status: 400 },
-      );
+    if (!Number.isFinite(income) || income <= 0) {
+      return badRequest("income must be a positive number (weekly $)");
     }
 
+    const modeStr = params.get("mode") ?? "income";
+    if (modeStr !== "income" && modeStr !== "budget") {
+      return badRequest('mode must be "income" or "budget"');
+    }
+    const mode: Mode = modeStr;
+
+    const bedroomsStr = params.get("bedrooms");
     const bedrooms = bedroomsStr ? Number(bedroomsStr) : null;
-    if (bedrooms !== null && (isNaN(bedrooms) || bedrooms < 1 || bedrooms > 5)) {
-      return NextResponse.json(
-        { error: "bedrooms must be between 1 and 5" },
-        { status: 400 },
-      );
+    if (bedrooms !== null && (!Number.isInteger(bedrooms) || bedrooms < 1 || bedrooms > 5)) {
+      return badRequest("bedrooms must be a whole number between 1 and 5");
     }
 
-    // --- Sharing mode ---
     const sharingStr = params.get("sharing");
-    const sharingCount = sharingStr ? Math.min(4, Math.max(1, Number(sharingStr) || 1)) : 1;
+    const sharingCount = sharingStr ? Number(sharingStr) : 1;
+    if (!Number.isInteger(sharingCount) || sharingCount < 1 || sharingCount > 4) {
+      return badRequest("sharing must be a whole number between 1 and 4");
+    }
     const shareBedroom = params.get("share_bedroom") === "1";
 
-    // Resolve workplace to a specific suburb (name-first, postcode-fallback)
-    const workplaceStr = params.get("workplace");
-    let workplacePostcode: string | null = null;
-    let workplaceName: string | null = null;
-    let workplaceLat: number | null = null;
-    let workplaceLng: number | null = null;
-    let workplaceSuburbKey: string | null = null;
-    if (workplaceStr) {
-      const trimmed = workplaceStr.trim();
-      // Always try name search first — returns exact > startsWith > contains > postcode
-      const matches = searchSuburbs(trimmed);
-      if (matches.length > 0) {
-        const match = matches[0];
-        workplacePostcode = match.postcode;
-        workplaceName = match.suburb_name;
-        workplaceLat = match.lat;
-        workplaceLng = match.lng;
-        workplaceSuburbKey = match.suburb_key;
-      } else if (/^\d{4}$/.test(trimmed)) {
-        // Pure postcode with no search results — try direct postcode lookup
-        const direct = getSuburbByPostcode(trimmed);
-        if (direct) {
-          workplacePostcode = direct.postcode;
-          workplaceName = direct.suburb_name;
-          workplaceLat = direct.lat;
-          workplaceLng = direct.lng;
-          workplaceSuburbKey = direct.suburb_key;
-        }
-      }
+    const workplaceQuery = params.get("workplace")?.trim() || null;
+    if (workplaceQuery && workplaceQuery.length > MAX_WORKPLACE_LENGTH) {
+      return badRequest(`workplace must be at most ${MAX_WORKPLACE_LENGTH} characters`);
     }
+    const workplace = workplaceQuery ? resolveWorkplace(workplaceQuery) : null;
 
-    // --- Build scored list ---
-    interface ScoredSuburb {
-      suburb_key: string;
-      postcode: string;
-      suburb_name: string | null;
-      lat: number | null;
-      lng: number | null;
-      median_rent: number;
-      rent_stress_pct: number;
-      affordability_score: number;
-      rating: string;
-      total_bonds: number;
-      rent_trend: Record<string, number>;
-      dwelling_types: Record<string, number>;
-      nearest_station: { name: string; distance_km: number; type: string; lines: string[] } | null;
-      commute_minutes: number | null;
-      commute_label: string | null;
-      // Sharing fields
-      sharing_mode: number;
-      total_rent: number;
-      per_person_rent: number;
-      solo_rent: number | null;
-      savings_vs_solo: number | null;
-      rent_estimated: boolean;
-    }
+    // --- Build the list, one entry per postcode ---
+    const results: RecommendedArea[] = [];
 
-    const scored: ScoredSuburb[] = [];
+    for (const area of getPostcodeAreas()) {
+      if (!hasCentroid(area)) continue;
 
-    for (const suburb of getAllSuburbs()) {
-      const resolved = resolveSharedRent(suburb, bedrooms, sharingCount, shareBedroom);
+      const resolved = resolveSharedRent(area, bedrooms, sharingCount, shareBedroom);
       if (!resolved) continue;
-
       const { totalRent, perPersonRent, rentEstimated } = resolved;
 
-      const stress = calculateRentStress(income, perPersonRent);
-      if (stress.percentage > 100) continue;
+      // income mode: share of income. budget mode: share of the budget.
+      if (mode === "budget" && perPersonRent > income) continue; // over budget
+      const pct = Math.round((perPersonRent / income) * 1000) / 10;
+      if (pct > 100) continue; // rent exceeds the whole income
 
       // Solo rent for savings comparison (1-bed as baseline)
       let soloRent: number | null = null;
       let savingsVsSolo: number | null = null;
       if (sharingCount > 1) {
-        soloRent = (suburb.median_rent_1bed as number | null) ?? (suburb.median_rent_overall as number | null);
-        if (soloRent !== null) {
-          savingsVsSolo = Math.round(soloRent - perPersonRent);
-        }
+        soloRent = area.median_rent_1bed ?? area.median_rent_overall;
+        if (soloRent !== null) savingsVsSolo = Math.round(soloRent - perPersonRent);
       }
 
-      // Nearest station
-      let nearestStation: ScoredSuburb["nearest_station"] = null;
-      if (suburb.lat != null && suburb.lng != null) {
-        const ns = getNearestStation(suburb.lat, suburb.lng);
-        if (ns) {
-          nearestStation = {
-            name: ns.station.name,
-            distance_km: ns.distanceKm,
-            type: ns.station.type,
-            lines: ns.station.lines,
-          };
-        }
-      }
+      const ns = getNearestStation(area.lat, area.lng);
 
-      // Commute estimate
-      let commuteMinutes: number | null = null;
-      let commuteLabel: string | null = null;
-      if (workplacePostcode) {
-        const est = estimateCommuteTime(suburb.postcode, workplacePostcode);
-        if (est) {
-          commuteMinutes = est.estimatedMinutes;
-          commuteLabel = est.label;
-        }
-      }
+      const amenities: AmenitySummary | null = getAmenitySummary(area.postcode);
+      const amenityScore: number | null = getAmenityScore(area.postcode);
 
-      // Composite affordability score
-      const supplyBonus = Math.min(5, suburb.total_bonds / 500);
-      const trendYears = Object.keys(suburb.rent_trend).sort();
-      let trendPenalty = 0;
-      if (trendYears.length >= 2) {
-        const oldest = suburb.rent_trend[trendYears[0]];
-        const newest = suburb.rent_trend[trendYears[trendYears.length - 1]];
-        if (oldest > 0) {
-          const increase = (newest - oldest) / oldest;
-          if (increase > 0.1) {
-            trendPenalty = Math.min(5, increase * 10);
-          }
-        }
-      }
-      const affordabilityScore =
-        Math.round((stress.percentage - supplyBonus + trendPenalty) * 10) / 10;
-
-      scored.push({
-        suburb_key: suburb.suburb_key,
-        postcode: suburb.postcode,
-        suburb_name: suburb.suburb_name,
-        lat: suburb.lat,
-        lng: suburb.lng,
+      results.push({
+        postcode: area.postcode,
+        suburb_key: area.suburb_key,
+        suburb_name: area.suburb_name,
+        suburb_names: area.suburb_names,
+        lat: area.lat,
+        lng: area.lng,
         median_rent: perPersonRent,
-        rent_stress_pct: stress.percentage,
-        affordability_score: affordabilityScore,
-        rating: stress.rating,
-        total_bonds: suburb.total_bonds,
-        rent_trend: suburb.rent_trend,
-        dwelling_types: suburb.dwelling_types,
-        nearest_station: nearestStation,
-        commute_minutes: commuteMinutes,
-        commute_label: commuteLabel,
-        // Sharing fields
+        rent_stress_pct: pct,
+        rating: mode === "income" ? getRentStressRating(pct) : null,
+        total_bonds: area.total_bonds,
+        low_sample: area.low_sample,
+        rent_trend: area.rent_trend,
+        dwelling_types: area.dwelling_types,
+        nearest_station: ns
+          ? {
+              name: ns.station.name,
+              distance_km: ns.distanceKm,
+              type: ns.station.type,
+              lines: ns.station.lines,
+            }
+          : null,
         sharing_mode: sharingCount,
-        total_rent: totalRent!,
+        total_rent: totalRent,
         per_person_rent: perPersonRent,
         solo_rent: soloRent,
         savings_vs_solo: savingsVsSolo,
         rent_estimated: rentEstimated,
+        is_workplace: workplace?.postcode === area.postcode,
+        distance_to_workplace_km: workplace
+          ? Math.round(haversineKm(area.lat, area.lng, workplace.lat, workplace.lng) * 10) / 10
+          : null,
+        amenities,
+        amenity_score: amenityScore,
       });
     }
 
-    // Sort by rent stress (lowest first) as default API ordering
-    scored.sort((a, b) => a.rent_stress_pct - b.rent_stress_pct);
+    // Default ordering: lowest rent stress first, postcode as a stable tie-break
+    results.sort(
+      (a, b) => a.rent_stress_pct - b.rent_stress_pct || a.postcode.localeCompare(b.postcode),
+    );
 
-    const top = scored.slice(0, MAX_RESULTS);
-
-    return NextResponse.json({
-      income_weekly: income,
-      bedrooms: bedrooms ?? "overall",
-      sharing_mode: sharingCount,
-      workplace: workplaceName ?? workplaceStr ?? null,
-      workplace_postcode: workplacePostcode,
-      workplace_suburb_key: workplaceSuburbKey,
-      workplace_lat: workplaceLat,
-      workplace_lng: workplaceLng,
-      total_matching: scored.length,
-      showing: top.length,
-      suburbs: top,
-    });
+    return NextResponse.json(
+      {
+        income_weekly: income,
+        mode,
+        bedrooms: bedrooms ?? "overall",
+        sharing_mode: sharingCount,
+        workplace: workplace?.suburb_name ?? null,
+        workplace_query: workplaceQuery,
+        workplace_resolved: workplaceQuery ? workplace !== null : false,
+        workplace_postcode: workplace?.postcode ?? null,
+        workplace_suburb_key: workplace?.suburb_key ?? null,
+        workplace_lat: workplace?.lat ?? null,
+        workplace_lng: workplace?.lng ?? null,
+        total_matching: results.length,
+        suburbs: results,
+      },
+      { headers: { "Cache-Control": CACHE_CONTROL } },
+    );
   } catch (error) {
     console.error("GET /api/recommend error:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

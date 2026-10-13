@@ -4,6 +4,8 @@ import { API_CONFIG, getOrsHeaders, toOrsCoords } from "@/config/apis";
 // Types
 // ---------------------------------------------------------------------------
 
+export type DirectionsMode = "driving" | "cycling";
+
 export interface DirectionsResult {
   duration_minutes: number;
   distance_km: number;
@@ -51,8 +53,18 @@ function decodePolyline(encoded: string): [number, number][] {
 // ORS Directions API client
 // ---------------------------------------------------------------------------
 
+const TIMEOUT_MS = 10_000;
+
+/** True when an ORS key is configured; callers should check before fetching. */
+export function isOrsConfigured(): boolean {
+  return API_CONFIG.openRouteService.apiKey !== "";
+}
+
 /**
- * Fetch turn-by-turn route geometry + summary from ORS.
+ * Fetch route geometry + summary from ORS.
+ *
+ * Throws on any failure. Error messages are for server logs only and must not
+ * be sent to clients; the upstream response body is logged here, never thrown.
  *
  * @param mode - "driving" uses driving-car, "cycling" uses cycling-regular
  * @returns Decoded geometry as [lat, lng] pairs, duration in minutes, distance in km
@@ -62,8 +74,10 @@ export async function fetchOrsDirections(
   fromLng: number,
   toLat: number,
   toLng: number,
-  mode: "driving" | "cycling" = "driving",
+  mode: DirectionsMode = "driving",
 ): Promise<DirectionsResult> {
+  if (!isOrsConfigured()) throw new Error("ORS API key not configured");
+
   const { baseUrl, endpoints } = API_CONFIG.openRouteService;
   const endpoint =
     mode === "cycling" ? endpoints.directionsCycling : endpoints.directionsJson;
@@ -76,7 +90,7 @@ export async function fetchOrsDirections(
   };
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
     const resp = await fetch(url, {
@@ -88,20 +102,33 @@ export async function fetchOrsDirections(
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
-      throw new Error(
-        `ORS Directions API ${resp.status}: ${text.slice(0, 300)}`,
-      );
+      console.error(`ORS directions ${resp.status}: ${text.slice(0, 300)}`);
+      throw new Error(`ORS directions responded ${resp.status}`);
     }
 
     const data = await resp.json();
-    const route = data.routes?.[0];
-    if (!route) throw new Error("No route returned from ORS");
+    const route = data?.routes?.[0];
+    if (!route) throw new Error("ORS directions returned no route");
 
-    const durationSec: number = route.summary?.duration ?? 0;
-    const distanceM: number = route.summary?.distance ?? 0;
+    const durationSec: unknown = route.summary?.duration;
+    const distanceM: unknown = route.summary?.distance;
+    if (
+      typeof durationSec !== "number" ||
+      !Number.isFinite(durationSec) ||
+      typeof distanceM !== "number" ||
+      !Number.isFinite(distanceM)
+    ) {
+      throw new Error("ORS directions returned no route summary");
+    }
 
-    // ORS returns encoded polyline in route.geometry
-    const geometry = decodePolyline(route.geometry as string);
+    // ORS returns an encoded polyline string in route.geometry
+    if (typeof route.geometry !== "string" || route.geometry === "") {
+      throw new Error("ORS directions returned no geometry");
+    }
+    const geometry = decodePolyline(route.geometry);
+    if (geometry.length === 0) {
+      throw new Error("ORS directions returned undecodable geometry");
+    }
 
     return {
       duration_minutes: Math.round(durationSec / 60),
